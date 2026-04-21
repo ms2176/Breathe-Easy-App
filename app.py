@@ -509,5 +509,5 @@ with right:
 st.divider()
 st.caption(
     "Thresholds: CO2 elevated >= 1,000 ppm | critical >= 2,000 ppm | "
-    "LightGBM model | IAQ sensor data from Malaysian primary schools."
+    "LightGBM model | IAQ sensor data from South African primary schools."
 )
