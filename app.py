@@ -27,18 +27,47 @@ CO2_WARN     = 1000   # ppm
 CO2_CRITICAL = 2000   # ppm
 
 HORIZONS = {
-    "11min": ("11 min", pd.Timedelta(minutes=11)),
-    "33min": ("33 min", pd.Timedelta(minutes=33)),
-    "1h":    ("1 h",    pd.Timedelta(hours=1)),
-    "3h":    ("3 h",    pd.Timedelta(hours=3)),
-    "6h":    ("6 h",    pd.Timedelta(hours=6)),
+    "11min": ("11 min",  pd.Timedelta(minutes=11)),
+    "33min": ("33 min",  pd.Timedelta(minutes=33)),
+    "1h":    ("1 hour",  pd.Timedelta(hours=1)),
+    "3h":    ("3 hours", pd.Timedelta(hours=3)),
+    "6h":    ("6 hours", pd.Timedelta(hours=6)),
 }
 
 SECONDARY = {
-    "Measured PM2.5": ("PM2.5",       "ug/m3"),
-    "Measured PM10":  ("PM10",        "ug/m3"),
-    "Measured T":     ("Temperature", "C"),
+    "Measured PM2.5": ("PM2.5",       "µg/m³"),
+    "Measured PM10":  ("PM10",        "µg/m³"),
+    "Measured T":     ("Temperature", "°C"),
     "Measured RH":    ("Humidity",    "%"),
+}
+
+# ── ACTION ADVICE per horizon status ─────────────────────────────────────────
+HORIZON_ADVICE = {
+    "11min": {
+        "safe":     "No action needed in the next 11 minutes.",
+        "warn":     "Air quality will become elevated in 11 minutes — open a window now.",
+        "critical": "Air quality will be critical in 11 minutes — open windows and doors immediately.",
+    },
+    "33min": {
+        "safe":     "No action needed in the next 33 minutes.",
+        "warn":     "Consider opening windows in the next 30 minutes.",
+        "critical": "Open windows now — CO₂ is forecast to reach dangerous levels within 33 minutes.",
+    },
+    "1h": {
+        "safe":     "Air quality expected to remain safe for the next hour.",
+        "warn":     "Plan to ventilate within the next hour.",
+        "critical": "Ventilation required within the next hour — consider rescheduling the class.",
+    },
+    "3h": {
+        "safe":     "Safe conditions expected for the next 3 hours.",
+        "warn":     "Air quality may deteriorate this session — monitor closely.",
+        "critical": "Conditions forecast to become critical this session. Plan ventilation breaks.",
+    },
+    "6h": {
+        "safe":     "Safe for the rest of the school day.",
+        "warn":     "Air quality concerns expected later today — prepare ventilation plan.",
+        "critical": "Poor air quality expected for most of today. Prioritise this classroom.",
+    },
 }
 
 # ── STYLES ────────────────────────────────────────────────────────────────────
@@ -57,6 +86,15 @@ html,body,[class*="css"]{font-family:'Inter',sans-serif;}
 .hz-status{font-size:.78rem;font-weight:600;margin-bottom:8px;}
 .hz-actual{font-size:.8rem;color:#374151;border-top:1px solid #e5e7eb;padding-top:6px;margin-top:4px;}
 .hz-err   {font-size:.75rem;color:#9ca3af;}
+.hz-advice{font-size:.72rem;color:#374151;font-style:italic;margin-top:5px;line-height:1.4;}
+
+.context-box {background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:12px 16px;margin-bottom:12px;color:#0c4a6e;font-size:.88rem;line-height:1.6;}
+.infra-row {display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f3f4f6;}
+.infra-name {flex:1;font-size:.9rem;font-weight:500;color:#111827;}
+.infra-bar-wrap {flex:2;background:#f3f4f6;border-radius:6px;height:10px;overflow:hidden;}
+.infra-bar {height:10px;border-radius:6px;}
+.infra-stat {font-size:.82rem;color:#374151;min-width:80px;text-align:right;}
+.infra-verdict {font-size:.78rem;font-weight:600;min-width:70px;text-align:right;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,20 +126,15 @@ def load_all():
         if b:
             full = pd.read_parquet(b)
             break
-    # test.parquet (17.8 MB) has the _future_ columns we need for validation.
-    # test_display.parquet (1.29 MB) is a trimmed version that drops them — load it only as fallback.
     for name in ["test.parquet", "test_display.parquet"]:
         b = load_local_or_hf(name)
         if b:
             test = pd.read_parquet(b)
-            # Verify it actually has future columns; if not, keep trying
             future_cols = [c for c in test.columns if "_future_" in c]
             if future_cols:
                 break
-            # Has no future cols — keep as fallback but continue looking
             test_fallback = test
             test = None
-    # If nothing had future cols, use the fallback
     if test is None:
         test = test_fallback if 'test_fallback' in dir() else None
 
@@ -148,7 +181,7 @@ def co2_status(v):
         return "critical", "Critical",  "#991b1b", "#fef2f2", "#ef4444"
     if v >= CO2_WARN:
         return "warn",     "Elevated",  "#9a6700", "#fff7ed", "#f59e0b"
-    return                 "safe",      "Safe",    "#166534", "#ecfdf3", "#22c55e"
+    return                 "safe",      "Good",    "#166534", "#ecfdf3", "#22c55e"
 
 def do_predict(row, horizon, scaler, feature_cols):
     model = load_model(horizon)
@@ -167,6 +200,16 @@ def nearest(df, ts):
 def banner(cls, html):
     st.markdown(f'<div class="banner-{cls}">{html}</div>', unsafe_allow_html=True)
 
+def worst_horizon_status(results):
+    """Return the worst status across all predicted horizons."""
+    for r in results:
+        if r["pred"] is not None and r["pred"] >= CO2_CRITICAL:
+            return "critical"
+    for r in results:
+        if r["pred"] is not None and r["pred"] >= CO2_WARN:
+            return "warn"
+    return "safe"
+
 
 # ── BOOT ──────────────────────────────────────────────────────────────────────
 try:
@@ -182,13 +225,30 @@ test_df      = df_test if df_test is not None else ref_df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 - ROOM FORECAST
+# HEADER
 # ══════════════════════════════════════════════════════════════════════════════
-st.markdown("## BreatheEasy")
-st.caption("Indoor air quality monitoring and AI-powered CO2 forecasting for school administrators.")
+st.markdown("## 🌬️ BreatheEasy")
+st.caption("Indoor air quality monitoring and AI-powered CO₂ forecasting for South African school administrators.")
 st.divider()
 
-st.markdown("### Select a Classroom")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 – ROOM FORECAST
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("### Is my classroom safe right now — and in the next few hours?")
+
+# ── Plain-language context for the administrator ──────────────────────────────
+st.markdown(
+    '<div class="context-box">'
+    '🏫 <b>How to use this section:</b> Select a classroom below, then pick a date and time. '
+    'The dashboard will show the current CO₂ level and predict whether air quality will become a '
+    'problem in the next 11 minutes, 33 minutes, 1 hour, 3 hours, or 6 hours ahead. '
+    'CO₂ above <b>1,000 ppm</b> causes reduced concentration. Above <b>2,000 ppm</b> requires immediate action. '
+    'Use these forecasts to decide when to open windows or take ventilation breaks.'
+    '</div>',
+    unsafe_allow_html=True
+)
+
 f1, f2, f3, f4, f5 = st.columns([1.4, 0.8, 0.8, 0.9, 0.9])
 
 infra   = f1.selectbox("Infrastructure type", sorted(ref_df["Classroom Type"].dropna().unique()))
@@ -197,7 +257,6 @@ school  = f2.selectbox("School", sorted(sub_ref["School No"].dropna().astype(int
 sub_ref = sub_ref[sub_ref["School No"] == school]
 room    = f3.selectbox("Room",   sorted(sub_ref["Room No"].dropna().astype(int).unique()))
 
-# Use test_df for predictions - it has _future_ actual columns
 room_test = test_df[
     (test_df["Classroom Type"] == infra) &
     (test_df["School No"]      == school) &
@@ -217,20 +276,9 @@ cur_row     = nearest(active_df, selected_ts)
 actual_ts   = pd.to_datetime(cur_row["datetime"])
 
 st.caption(
-    f"Selected: **{selected_ts.strftime('%Y-%m-%d %H:%M')}** — "
-    f"nearest recorded reading: **{actual_ts.strftime('%Y-%m-%d %H:%M')}**"
+    f"Showing data for: **{infra}** · School {school} · Room {room} · "
+    f"Nearest recorded reading to your selection: **{actual_ts.strftime('%d %b %Y, %H:%M')}**"
 )
-
-# Show which future columns are actually present so user can diagnose missing actuals
-_future_cols = [c for c in active_df.columns if "_future_" in c]
-if not _future_cols:
-    st.warning(
-        "**No future columns found** in the loaded dataset — actual future CO2 values cannot be shown. "
-        "This usually means `test_display.parquet` loaded instead of `test.parquet`. "
-        "The 17.8 MB `test.parquet` on HuggingFace contains the `_future_` columns needed for validation."
-    )
-else:
-    st.caption(f"Validation data available")
 
 # ── Current snapshot ──────────────────────────────────────────────────────────
 co2_now = float(cur_row["Measured CO2"]) if "Measured CO2" in cur_row.index and pd.notna(cur_row["Measured CO2"]) else np.nan
@@ -238,41 +286,35 @@ co2_now = float(cur_row["Measured CO2"]) if "Measured CO2" in cur_row.index and 
 if not np.isnan(co2_now):
     cls, lbl, *_ = co2_status(co2_now)
     msgs = {
-        "safe":     f"CO2 is <b>{co2_now:.0f} ppm</b> - air quality is good.",
-        "warn":     f"CO2 is <b>{co2_now:.0f} ppm</b> - above the 1,000 ppm threshold. Consider increasing ventilation.",
-        "critical": f"CO2 is <b>{co2_now:.0f} ppm</b> - critically high. Immediate action required.",
+        "safe":     f"✅ <b>Air quality is good.</b> CO₂ is currently <b>{co2_now:.0f} ppm</b> — well within the safe limit of 1,000 ppm.",
+        "warn":     f"⚠️ <b>Air quality is elevated.</b> CO₂ is <b>{co2_now:.0f} ppm</b> — above the 1,000 ppm threshold. Consider increasing ventilation.",
+        "critical": f"🔴 <b>Immediate action required.</b> CO₂ is <b>{co2_now:.0f} ppm</b> — critically high. Open windows and doors now.",
     }
     banner(cls, msgs[cls])
 
+st.markdown("**Current readings in this classroom:**")
 m_cols = st.columns(5)
-m_cols[0].metric("CO2 (ppm)", f"{co2_now:.0f}" if not np.isnan(co2_now) else "-")
+m_cols[0].metric("CO₂ (ppm)", f"{co2_now:.0f}" if not np.isnan(co2_now) else "—", help="Safe below 1,000 ppm. Above 2,000 ppm is critical.")
 for col, (target, (label, unit)) in zip(m_cols[1:], SECONDARY.items()):
     v = float(cur_row[target]) if target in cur_row.index and pd.notna(cur_row[target]) else np.nan
-    col.metric(f"{label} ({unit})", f"{v:.1f}" if not np.isnan(v) else "-")
+    col.metric(f"{label} ({unit})", f"{v:.1f}" if not np.isnan(v) else "—")
 
 st.divider()
 
 # ── Forecast ──────────────────────────────────────────────────────────────────
-st.markdown("### CO2 Forecast from Selected Moment")
-st.markdown(
-    "LightGBM predicts CO2 at **11 min, 33 min, 1 h, 3 h and 6 h** ahead. "
-    "The **actual recorded CO2** at each future time is shown so you can see how accurate the model is."
-)
+st.markdown("### What will the air quality be like in the next few hours?")
 
 # Run all predictions
 results = []
 for hz_key, (hz_label, hz_delta) in HORIZONS.items():
     future_ts  = actual_ts + hz_delta
     pred       = do_predict(cur_row, hz_key, scaler, feature_cols)
-
-    # The actual CO2 value recorded at that future time
     actual_col = f"Measured CO2_future_{hz_key}"
     actual_val = (
         float(cur_row[actual_col])
         if actual_col in cur_row.index and pd.notna(cur_row[actual_col])
         else np.nan
     )
-
     results.append({
         "hz_key":    hz_key,
         "label":     hz_label,
@@ -281,36 +323,27 @@ for hz_key, (hz_label, hz_delta) in HORIZONS.items():
         "actual":    actual_val,
     })
 
-# Risk summary
-risk_cls, risk_msg = "safe", "Forecast: CO2 expected to remain within safe limits."
-for r in results:
-    if r["pred"] is None:
-        continue
-    cls, *_ = co2_status(r["pred"])
-    if cls == "critical":
-        risk_cls = "critical"
-        risk_msg = f"Forecast: CO2 predicted to reach <b>critical levels by {r['label']}</b>. Open windows and increase ventilation now."
-        break
-    if cls == "warn" and risk_cls == "safe":
-        risk_cls = "warn"
-        risk_msg = f"Forecast: CO2 predicted to become <b>elevated within {r['label']}</b>. Plan to ventilate soon."
-
-banner(risk_cls, f"<b>{risk_cls.capitalize()}.</b> {risk_msg}")
+# Overall risk summary — plain language for administrator
+worst_cls = worst_horizon_status(results)
+risk_msgs = {
+    "safe":     "✅ <b>Good news.</b> Air quality is forecast to remain safe for the next 6 hours. No ventilation action is needed right now.",
+    "warn":     "⚠️ <b>Heads up.</b> CO₂ levels are forecast to become elevated in the coming hours. See the timeline below to plan ventilation.",
+    "critical": "🔴 <b>Action required.</b> CO₂ is forecast to reach critical levels. Open windows now and check the timeline below for when conditions are worst.",
+}
+banner(worst_cls, risk_msgs[worst_cls])
 
 # Chart
 history = active_df[active_df["datetime"] <= actual_ts].tail(20)
 
 fig = go.Figure()
-
 fig.add_trace(go.Scatter(
     x=history["datetime"], y=history["Measured CO2"],
-    mode="lines+markers", name="Actual history",
+    mode="lines+markers", name="Past CO₂ readings",
     line=dict(width=3, color="#335CFF"), marker=dict(size=5),
 ))
-
 fig.add_trace(go.Scatter(
     x=[actual_ts], y=[co2_now],
-    mode="markers", name="Current reading",
+    mode="markers", name="Now",
     marker=dict(size=14, color="#111827", symbol="circle"),
 ))
 
@@ -319,7 +352,7 @@ if valid_pred:
     fig.add_trace(go.Scatter(
         x=[actual_ts] + [t for t, _ in valid_pred],
         y=[co2_now]   + [v for _, v in valid_pred],
-        mode="lines+markers", name="Model prediction",
+        mode="lines+markers", name="AI forecast",
         line=dict(width=3, color="#7C3AED", dash="dot"),
         marker=dict(size=10, symbol="diamond"),
     ))
@@ -329,7 +362,7 @@ if valid_actual:
     fig.add_trace(go.Scatter(
         x=[actual_ts] + [t for t, _ in valid_actual],
         y=[co2_now]   + [v for _, v in valid_actual],
-        mode="lines+markers", name="Actual CO2 (recorded)",
+        mode="lines+markers", name="What actually happened",
         line=dict(width=2.5, color="#10B981", dash="dash"),
         marker=dict(size=8, symbol="circle-open", line=dict(width=2, color="#10B981")),
     ))
@@ -347,17 +380,17 @@ if valid_pred:
     )
 
 fig.update_layout(
-    title="CO2 - Actual history, model predictions, and actual future values",
+    title="CO₂ levels: past readings, AI forecast, and what actually happened (for validation)",
     height=420, margin=dict(l=8, r=8, t=48, b=8),
-    yaxis_title="CO2 (ppm)", xaxis_title="",
+    yaxis_title="CO₂ (ppm)", xaxis_title="",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
     yaxis=dict(gridcolor="#f3f4f6"), xaxis=dict(gridcolor="#f3f4f6"),
 )
-st.plotly_chart(fig, width=True)
+st.plotly_chart(fig, use_container_width=True)
 
-# Horizon cards - predicted vs actual side by side
-st.markdown("**Predicted vs Actual CO2 at each forecast horizon:**")
+# ── Horizon cards ─────────────────────────────────────────────────────────────
+st.markdown("**Should I act now? — Forecast at each time horizon:**")
 hz_cols = st.columns(5)
 
 for col, r in zip(hz_cols, results):
@@ -367,44 +400,53 @@ for col, r in zip(hz_cols, results):
     if pred is not None:
         p_cls, p_lbl, p_txt, p_bg, p_bdr = co2_status(pred)
         pred_str = f"{pred:.0f} ppm"
+        advice   = HORIZON_ADVICE[r["hz_key"]][p_cls]
     else:
-        p_cls, p_lbl, p_txt, p_bg, p_bdr = "safe", "-", "#374151", "#f9fafb", "#e5e7eb"
-        pred_str = "-"
+        p_cls, p_lbl, p_txt, p_bg, p_bdr = "safe", "—", "#374151", "#f9fafb", "#e5e7eb"
+        pred_str = "—"
+        advice   = ""
 
     if not np.isnan(actual):
         a_cls, a_lbl, a_txt, *_ = co2_status(actual)
         icon = "✅" if a_cls == "safe" else "⚠️" if a_cls == "warn" else "🔴"
         err_html = (
-            f'<span class="hz-err">Error: {abs(pred - actual):.0f} ppm</span>'
+            f'<span class="hz-err">Model was off by {abs(pred - actual):.0f} ppm</span>'
             if pred is not None else ""
         )
         actual_html = (
             f'<div class="hz-actual">'
-            f'Actual: <b style="color:{a_txt};">{actual:.0f} ppm</b> {icon}'
+            f'Recorded: <b style="color:{a_txt};">{actual:.0f} ppm</b> {icon}'
             f'<br>{err_html}</div>'
         )
     else:
-        actual_html = '<div class="hz-actual" style="color:#9ca3af;">No actual data</div>'
+        actual_html = ""
 
     pred_icon = "✅" if p_cls == "safe" else "⚠️" if p_cls == "warn" else "🔴"
 
     col.markdown(f"""
     <div class="hz-card" style="background:{p_bg};border-color:{p_bdr};">
-      <div class="hz-label">{r["label"]} ahead</div>
+      <div class="hz-label">In {r["label"]}</div>
       <div class="hz-pred" style="color:{p_txt};">{pred_str}</div>
       <div class="hz-status" style="color:{p_txt};">{pred_icon} {p_lbl}</div>
+      <div class="hz-advice">{advice}</div>
       {actual_html}
     </div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 - INFRASTRUCTURE COMPARISON
+# SECTION 2 – INFRASTRUCTURE COMPARISON
 # ══════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.markdown("### Infrastructure Type Comparison")
+st.markdown("### Which type of classroom has the worst air quality?")
+
 st.markdown(
-    "Which type of classroom has the worst air quality across all schools? "
-    "**Warning rate** = percentage of readings where CO2 exceeded 1,000 ppm."
+    '<div class="context-box">'
+    '📊 <b>How to use this section:</b> This compares air quality across all six classroom types in the dataset. '
+    'The <b>warning rate</b> shows what percentage of the time CO₂ was above the safe limit of 1,000 ppm. '
+    'A higher warning rate means students in that classroom type are more frequently exposed to poor air quality. '
+    'Use this to prioritise which building types need ventilation improvements most urgently.'
+    '</div>',
+    unsafe_allow_html=True
 )
 
 cmp = ref_df.dropna(subset=["Measured CO2"]).copy()
@@ -431,21 +473,33 @@ worst = infra_stats.iloc[0]
 best  = infra_stats.iloc[-1]
 w_cls = "critical" if worst["Warning rate (%)"] > 30 else "warn" if worst["Warning rate (%)"] > 10 else "safe"
 
-banner(w_cls,
-    f"<b>{worst['Type']}</b> has the highest CO2 warning rate: "
-    f"<b>{worst['Warning rate (%)']:.1f}%</b> of readings exceed 1,000 ppm "
-    f"(mean {worst['Mean']:.0f} ppm, peak {worst['Peak']:.0f} ppm). "
-    f"<b>{best['Type']}</b> performs best at {best['Warning rate (%)']:.1f}%."
+# Plain-language verdict using actual numbers
+banner(
+    w_cls,
+    f"🏫 <b>{worst['Type']}</b> needs the most attention: CO₂ exceeded the safe limit "
+    f"<b>{worst['Warning rate (%)']:.1f}% of the time</b> "
+    f"(average {worst['Mean']:.0f} ppm, peak {worst['Peak']:.0f} ppm). "
+    f"<b>{best['Type']}</b> performed best, with unsafe CO₂ in only {best['Warning rate (%)']:.1f}% of readings."
 )
-
-bar_colors = [
-    "#DC2626" if v > 30 else "#F59E0B" if v > 10 else "#22c55e"
-    for v in infra_stats["Warning rate (%)"]
-]
 
 left, right = st.columns(2)
 
 with left:
+    # Add a plain verdict column
+    def infra_verdict(warn_rate):
+        if warn_rate > 30:
+            return "🔴 High concern"
+        elif warn_rate > 10:
+            return "⚠️ Moderate concern"
+        elif warn_rate > 5:
+            return "🟡 Low concern"
+        return "✅ Generally safe"
+
+    bar_colors = [
+        "#DC2626" if v > 30 else "#F59E0B" if v > 10 else "#84cc16" if v > 5 else "#22c55e"
+        for v in infra_stats["Warning rate (%)"]
+    ]
+
     fig2 = go.Figure()
     fig2.add_trace(go.Bar(
         x=infra_stats["Type"],
@@ -458,56 +512,79 @@ with left:
             infra_stats["Peak"].round(0),
             infra_stats["Critical rate (%)"].round(1),
             infra_stats["Readings"],
+            [infra_verdict(v) for v in infra_stats["Warning rate (%)"]],
         ], axis=-1),
         hovertemplate=(
-            "<b>%{x}</b><br>Warning rate: %{y:.1f}%<br>"
-            "Mean CO2: %{customdata[0]:.0f} ppm<br>"
-            "Peak: %{customdata[1]:.0f} ppm<br>"
-            "Critical rate: %{customdata[2]:.1f}%<br>"
-            "Readings: %{customdata[3]:,}<extra></extra>"
+            "<b>%{x}</b><br>"
+            "Unsafe air quality: %{y:.1f}% of the time<br>"
+            "Average CO₂: %{customdata[0]:.0f} ppm<br>"
+            "Peak CO₂: %{customdata[1]:.0f} ppm<br>"
+            "Critically high: %{customdata[2]:.1f}% of the time<br>"
+            "Total readings: %{customdata[3]:,}<br>"
+            "Assessment: %{customdata[4]}<extra></extra>"
         ),
     ))
     fig2.update_layout(
-        title="CO2 Warning Rate by Infrastructure Type",
+        title="How often was CO₂ above the safe limit? (by classroom type)",
         height=380, margin=dict(l=8, r=8, t=48, b=8),
-        yaxis_title="% readings above 1,000 ppm",
+        yaxis_title="% of time CO₂ exceeded 1,000 ppm",
+        xaxis_title="",
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(gridcolor="#f3f4f6"),
     )
-    st.plotly_chart(fig2, width=True)
+    st.plotly_chart(fig2, use_container_width=True)
 
 with right:
     fig3 = go.Figure()
     fig3.add_trace(go.Bar(
         x=infra_stats["Type"], y=infra_stats["Mean"],
-        name="Mean CO2", marker_color="#335CFF", opacity=0.85,
+        name="Average CO₂", marker_color="#335CFF", opacity=0.85,
         text=[f"{v:.0f}" for v in infra_stats["Mean"]], textposition="outside",
     ))
     fig3.add_trace(go.Bar(
         x=infra_stats["Type"], y=infra_stats["Peak"],
-        name="Peak CO2", marker_color="#DC2626", opacity=0.6,
+        name="Highest recorded CO₂", marker_color="#DC2626", opacity=0.6,
         text=[f"{v:.0f}" for v in infra_stats["Peak"]], textposition="outside",
     ))
     fig3.add_hline(y=CO2_WARN, line_dash="dash", line_color="#F59E0B",
-                   annotation_text="1,000 ppm threshold", annotation_position="top right")
+                   annotation_text="Safe limit: 1,000 ppm", annotation_position="top right")
     fig3.update_layout(
-        title="Mean & Peak CO2 by Infrastructure Type (ppm)",
+        title="Average and highest CO₂ recorded (by classroom type)",
         height=380, barmode="group", margin=dict(l=8, r=8, t=48, b=8),
-        yaxis_title="CO2 (ppm)",
+        yaxis_title="CO₂ (ppm)",
+        xaxis_title="",
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(gridcolor="#f3f4f6"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig3, width=True)
+    st.plotly_chart(fig3, use_container_width=True)
 
-# with st.expander("Full comparison table"):
-#     display = infra_stats.copy()
-#     display["Mean"] = display["Mean"].round(1)
-#     display["Peak"] = display["Peak"].round(1)
-#     st.dataframe(display, width=True, hide_index=True)
+# ── Summary verdict table ──────────────────────────────────────────────────────
+st.markdown("**Summary: Air quality assessment by classroom type**")
+verdict_cols = st.columns(len(infra_stats))
+for col, (_, row) in zip(verdict_cols, infra_stats.iterrows()):
+    v = infra_verdict(row["Warning rate (%)"])
+    cls_bg = (
+        "#fef2f2" if row["Warning rate (%)"] > 30
+        else "#fff7ed" if row["Warning rate (%)"] > 10
+        else "#f0fdf4"
+    )
+    cls_txt = (
+        "#991b1b" if row["Warning rate (%)"] > 30
+        else "#9a6700" if row["Warning rate (%)"] > 10
+        else "#166534"
+    )
+    col.markdown(
+        f"<div style='background:{cls_bg};border-radius:10px;padding:10px 8px;text-align:center;'>"
+        f"<div style='font-size:.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;'>{row['Type']}</div>"
+        f"<div style='font-size:1.1rem;font-weight:700;color:{cls_txt};'>{row['Warning rate (%)']:.1f}%</div>"
+        f"<div style='font-size:.72rem;color:{cls_txt};margin-top:3px;'>{v}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
 
 st.divider()
 st.caption(
-    "Thresholds: CO2 elevated >= 1,000 ppm | critical >= 2,000 ppm | "
-    "LightGBM model | IAQ sensor data from South African primary schools."
+    "CO₂ safe limit: 1,000 ppm (WHO guideline) · Critical: 2,000 ppm · "
+    "Forecasts powered by LightGBM trained on 372,084 sensor readings from South African primary schools."
 )

@@ -1,0 +1,19 @@
+target,horizon,A,B,DM,p,result
+Measured CO2,1h,LightGBM,XGBoost,-22.5641,0.0,Model A better ***
+Measured CO2,1h,LightGBM,RandomForest,1.4341,0.1516,Model B better ns
+Measured CO2,1h,XGBoost,RandomForest,23.1926,0.0,Model B better ***
+Measured CO2,3h,LightGBM,XGBoost,-11.942,0.0,Model A better ***
+Measured CO2,3h,LightGBM,RandomForest,-6.6448,0.0,Model A better ***
+Measured CO2,3h,XGBoost,RandomForest,13.1006,0.0,Model B better ***
+Measured CO2,6h,LightGBM,XGBoost,-17.5837,0.0,Model A better ***
+Measured CO2,6h,LightGBM,RandomForest,-6.9792,0.0,Model A better ***
+Measured CO2,6h,XGBoost,RandomForest,8.1962,0.0,Model B better ***
+Measured PM2.5,1h,LightGBM,XGBoost,-40.3346,0.0,Model A better ***
+Measured PM2.5,1h,LightGBM,RandomForest,0.9333,0.3507,Model B better ns
+Measured PM2.5,1h,XGBoost,RandomForest,41.5128,0.0,Model B better ***
+Measured PM2.5,3h,LightGBM,XGBoost,-20.199,0.0,Model A better ***
+Measured PM2.5,3h,LightGBM,RandomForest,-1.5102,0.131,Model A better ns
+Measured PM2.5,3h,XGBoost,RandomForest,14.2234,0.0,Model B better ***
+Measured PM2.5,6h,LightGBM,XGBoost,-8.2019,0.0,Model A better ***
+Measured PM2.5,6h,LightGBM,RandomForest,-7.1676,0.0,Model A better ***
+Measured PM2.5,6h,XGBoost,RandomForest,-3.7917,0.0001,Model A better ***
