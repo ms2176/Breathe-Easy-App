@@ -319,35 +319,79 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ── CASCADING DROPDOWNS (each depends on the one above) ──────────────────────
-# Step 1: Infrastructure type
+# ── CASCADING DROPDOWNS ──────────────────────────────────────────────────────
+# Each level resets the ones below it when it changes, so the user can ONLY
+# ever pick a value that actually exists in the data.
+
 infra_options = safe_sorted_unique(ref_df["Classroom Type"])
 if not infra_options:
     st.error("No infrastructure types found in the dataset.")
     st.stop()
 
+# Initialise session state keys on first run
+if "sel_infra" not in st.session_state:
+    st.session_state["sel_infra"] = infra_options[0]
+if "sel_school" not in st.session_state:
+    st.session_state["sel_school"] = None
+if "sel_room" not in st.session_state:
+    st.session_state["sel_room"] = None
+
+def on_infra_change():
+    # Infra changed → wipe school + room so they recompute from scratch
+    st.session_state["sel_school"] = None
+    st.session_state["sel_room"]   = None
+
+def on_school_change():
+    # School changed → wipe room
+    st.session_state["sel_room"] = None
+
 f1, f2, f3 = st.columns([1.4, 0.8, 0.8])
-infra = f1.selectbox("Infrastructure type", infra_options)
 
-# Step 2: School — only those that exist under the chosen infra
-sub_infra = ref_df[ref_df["Classroom Type"] == infra].copy()
+infra = f1.selectbox(
+    "Infrastructure type",
+    infra_options,
+    index=infra_options.index(st.session_state["sel_infra"])
+          if st.session_state["sel_infra"] in infra_options else 0,
+    key="sel_infra",
+    on_change=on_infra_change,
+)
+
+# School options — strictly filtered to chosen infra
+sub_infra     = ref_df[ref_df["Classroom Type"] == infra].copy()
 school_options = safe_sorted_unique(sub_infra["School No"], cast=int)
-
 if not school_options:
-    st.warning(f"No schools found for infrastructure type **{infra}**.")
+    st.error(f"No schools exist for infrastructure type **{infra}**.")
     st.stop()
 
-school = f2.selectbox("School", school_options)
+# Clamp saved school to valid options
+if st.session_state["sel_school"] not in school_options:
+    st.session_state["sel_school"] = school_options[0]
 
-# Step 3: Room — only those that exist under chosen infra + school
-sub_school = sub_infra[sub_infra["School No"] == school].copy()
+school = f2.selectbox(
+    "School",
+    school_options,
+    index=school_options.index(st.session_state["sel_school"]),
+    key="sel_school",
+    on_change=on_school_change,
+)
+
+# Room options — strictly filtered to chosen infra + school
+sub_school   = sub_infra[sub_infra["School No"] == school].copy()
 room_options = safe_sorted_unique(sub_school["Room No"], cast=int)
-
 if not room_options:
-    st.warning(f"No rooms found for **{infra}** / School {school}.")
+    st.error(f"No rooms exist for **{infra}** / School {school}.")
     st.stop()
 
-room = f3.selectbox("Room", room_options)
+# Clamp saved room to valid options
+if st.session_state["sel_room"] not in room_options:
+    st.session_state["sel_room"] = room_options[0]
+
+room = f3.selectbox(
+    "Room",
+    room_options,
+    index=room_options.index(st.session_state["sel_room"]),
+    key="sel_room",
+)
 
 # ── Build the active dataset for this combo ───────────────────────────────────
 # Prefer test data (has future actuals for validation); fall back to full data
