@@ -283,24 +283,27 @@ room_test = test_df[
     (test_df["Room No"] == room)
 ].copy() if test_df is not None else pd.DataFrame()
 
+room_view_ready = True
+room_view_message = None
+
 room_ref = sub_ref[sub_ref["Room No"] == room].copy()
 active_df = room_test if not room_test.empty else room_ref
 
 if active_df.empty or "datetime" not in active_df.columns:
-    st.warning(
+    room_view_ready = False
+    room_view_message = (
         "No data is available for this classroom combination. "
         "Please choose a different infrastructure type, school, or room."
     )
-    st.stop()
+else:
+    active_df = active_df.dropna(subset=["datetime"]).copy()
 
-active_df = active_df.dropna(subset=["datetime"]).copy()
-
-if active_df.empty:
-    st.warning(
-        "This classroom combination exists, but it has no valid timestamps. "
-        "Please choose a different room."
-    )
-    st.stop()
+    if active_df.empty:
+        room_view_ready = False
+        room_view_message = (
+            "This classroom combination exists, but it has no valid timestamps. "
+            "Please choose a different room."
+        )
 
 min_d = active_df["datetime"].min().date()
 max_d = active_df["datetime"].max().date()
@@ -309,19 +312,26 @@ default_d = max(min_d, min(max_d, pd.Timestamp("2023-11-06").date()))
 sel_date = f4.date_input("Date", value=default_d, min_value=min_d, max_value=max_d)
 sel_time = f5.time_input("Time", value=pd.Timestamp("07:45").time())
 
-selected_ts = pd.Timestamp(f"{sel_date} {sel_time}")
-cur_row = nearest(active_df, selected_ts)
+cur_row = None
+actual_ts = None
 
-if cur_row is None:
-    st.warning("No valid reading is available for the selected date and time.")
-    st.stop()
+if room_view_ready:
+    selected_ts = pd.Timestamp(f"{sel_date} {sel_time}")
+    cur_row = nearest(active_df, selected_ts)
 
-actual_ts = pd.to_datetime(cur_row["datetime"])
+    if cur_row is None:
+        room_view_ready = False
+        room_view_message = "No valid reading is available for the selected date and time."
+    else:
+        actual_ts = pd.to_datetime(cur_row["datetime"])
 
-st.caption(
-    f"Showing data for: **{infra}** · School {school} · Room {room} · "
-    f"Nearest recorded reading to your selection: **{actual_ts.strftime('%d %b %Y, %H:%M')}**"
-)
+if not room_view_ready:
+    st.warning(room_view_message)
+else:
+    st.caption(
+        f"Showing data for: **{infra}** · School {school} · Room {room} · "
+        f"Nearest recorded reading to your selection: **{actual_ts.strftime('%d %b %Y, %H:%M')}**"
+        )
 
 # ── Current snapshot ──────────────────────────────────────────────────────────
 co2_now = float(cur_row["Measured CO2"]) if "Measured CO2" in cur_row.index and pd.notna(cur_row["Measured CO2"]) else np.nan
