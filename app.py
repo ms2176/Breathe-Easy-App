@@ -387,7 +387,7 @@ fig.update_layout(
     plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
     yaxis=dict(gridcolor="#f3f4f6"), xaxis=dict(gridcolor="#f3f4f6"),
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width=True)
 
 # ── Horizon cards ─────────────────────────────────────────────────────────────
 st.markdown("**Should I act now? — Forecast at each time horizon:**")
@@ -532,7 +532,7 @@ with left:
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(gridcolor="#f3f4f6"),
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width=True)
 
 with right:
     fig3 = go.Figure()
@@ -557,7 +557,7 @@ with right:
         yaxis=dict(gridcolor="#f3f4f6"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, width=True)
 
 # ── Summary verdict table ──────────────────────────────────────────────────────
 st.markdown("**Summary: Air quality assessment by classroom type**")
