@@ -5,23 +5,50 @@ Two jobs:
   2. Infra Compare  – which infrastructure type has the worst air quality
 """
 
-import io, json, os, pickle, warnings
+import io, json, os, pickle, warnings, sys, traceback
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-import requests
+# ── Streamlit must be imported first so we can render errors ──────────────────
 import streamlit as st
-from sklearn.preprocessing import MinMaxScaler
+st.set_page_config(page_title="BreatheEasy", page_icon="🌬️", layout="wide")
+
+# ── All other imports wrapped so missing packages show a clear message ─────────
+_import_errors = []
+try:
+    import numpy as np
+except ImportError:
+    _import_errors.append("numpy")
+try:
+    import pandas as pd
+except ImportError:
+    _import_errors.append("pandas")
+try:
+    import plotly.graph_objects as go
+except ImportError:
+    _import_errors.append("plotly")
+try:
+    import requests
+except ImportError:
+    _import_errors.append("requests")
+try:
+    from sklearn.preprocessing import MinMaxScaler
+except ImportError:
+    _import_errors.append("scikit-learn")
+
+if _import_errors:
+    st.error(f"Missing required packages: {', '.join(_import_errors)}. Run: pip install {' '.join(_import_errors)}")
+    st.stop()
 
 warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="BreatheEasy", page_icon="🌬️", layout="wide")
-
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 HF_BASE  = "https://huggingface.co/datasets/mufliha/iaq-prediction/resolve/main"
-HF_CACHE = Path(".hf_cache"); HF_CACHE.mkdir(exist_ok=True)
+try:
+    HF_CACHE = Path(".hf_cache")
+    HF_CACHE.mkdir(exist_ok=True)
+except Exception:
+    HF_CACHE = Path("/tmp/.hf_cache")
+    HF_CACHE.mkdir(exist_ok=True)
 
 CO2_WARN     = 1000   # ppm
 CO2_CRITICAL = 2000   # ppm
@@ -236,18 +263,36 @@ def safe_sorted_unique(series, cast=None):
 # ── BOOT ──────────────────────────────────────────────────────────────────────
 try:
     df_full, df_test, scaler_params, feature_meta = load_all()
-except Exception as e:
-    st.error(f"Could not load data: {e}")
+except Exception:
+    st.error("**Data loading failed.** Full traceback:")
+    st.code(traceback.format_exc())
     st.stop()
 
 if df_full is None and df_test is None:
-    st.error("No data could be loaded. Check your data files and try again.")
+    st.error(
+        "No data files could be loaded (tried HuggingFace + local paths). "
+        "Need at least `full_featured.parquet` or `test.parquet`."
+    )
     st.stop()
 
-scaler       = build_scaler(scaler_params)
-feature_cols = (feature_meta or {}).get("feature_cols", [])
-ref_df       = df_full if df_full is not None else df_test
-test_df      = df_test if df_test is not None else ref_df
+try:
+    scaler       = build_scaler(scaler_params)
+    feature_cols = (feature_meta or {}).get("feature_cols", [])
+    ref_df       = df_full if df_full is not None else df_test
+    test_df      = df_test if df_test is not None else ref_df
+except Exception:
+    st.error("**Failed during scaler/feature setup:**")
+    st.code(traceback.format_exc())
+    st.stop()
+
+_required_cols = ["Classroom Type", "School No", "Room No", "datetime", "Measured CO2"]
+_missing = [c for c in _required_cols if c not in ref_df.columns]
+if _missing:
+    st.error(
+        f"Dataset is missing required columns: `{', '.join(_missing)}`\n\n"
+        f"Found: `{', '.join(ref_df.columns.tolist())}`"
+    )
+    st.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
