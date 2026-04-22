@@ -195,7 +195,10 @@ def do_predict(row, horizon, scaler, feature_cols):
         return None
 
 def nearest(df, ts):
-    return df.loc[(df["datetime"] - ts).abs().idxmin()]
+    if df.empty or "datetime" not in df.columns or df["datetime"].dropna().empty:
+        return None
+    idx = (df["datetime"] - ts).abs().idxmin()
+    return df.loc[idx]
 
 def banner(cls, html):
     st.markdown(f'<div class="banner-{cls}">{html}</div>', unsafe_allow_html=True)
@@ -251,29 +254,69 @@ st.markdown(
 
 f1, f2, f3, f4, f5 = st.columns([1.4, 0.8, 0.8, 0.9, 0.9])
 
-infra   = f1.selectbox("Infrastructure type", sorted(ref_df["Classroom Type"].dropna().unique()))
-sub_ref = ref_df[ref_df["Classroom Type"] == infra]
-school  = f2.selectbox("School", sorted(sub_ref["School No"].dropna().astype(int).unique()))
-sub_ref = sub_ref[sub_ref["School No"] == school]
-room    = f3.selectbox("Room",   sorted(sub_ref["Room No"].dropna().astype(int).unique()))
+infra_options = sorted(ref_df["Classroom Type"].dropna().unique())
+if not infra_options:
+    st.error("No infrastructure types are available in the dataset.")
+    st.stop()
+
+infra = f1.selectbox("Infrastructure type", infra_options)
+sub_ref = ref_df[ref_df["Classroom Type"] == infra].copy()
+
+school_options = sorted(sub_ref["School No"].dropna().astype(int).unique())
+if not school_options:
+    st.warning("No schools are available for the selected infrastructure type.")
+    st.stop()
+
+school = f2.selectbox("School", school_options)
+sub_ref = sub_ref[sub_ref["School No"] == school].copy()
+
+room_options = sorted(sub_ref["Room No"].dropna().astype(int).unique())
+if not room_options:
+    st.warning("No rooms are available for the selected school.")
+    st.stop()
+
+room = f3.selectbox("Room", room_options)
 
 room_test = test_df[
     (test_df["Classroom Type"] == infra) &
-    (test_df["School No"]      == school) &
-    (test_df["Room No"]        == room)
+    (test_df["School No"] == school) &
+    (test_df["Room No"] == room)
 ].copy() if test_df is not None else pd.DataFrame()
 
-active_df = room_test if len(room_test) > 0 else sub_ref[sub_ref["Room No"] == room].copy()
+room_ref = sub_ref[sub_ref["Room No"] == room].copy()
+active_df = room_test if not room_test.empty else room_ref
 
-min_d     = active_df["datetime"].min().date()
-max_d     = active_df["datetime"].max().date()
+if active_df.empty or "datetime" not in active_df.columns:
+    st.warning(
+        "No data is available for this classroom combination. "
+        "Please choose a different infrastructure type, school, or room."
+    )
+    st.stop()
+
+active_df = active_df.dropna(subset=["datetime"]).copy()
+
+if active_df.empty:
+    st.warning(
+        "This classroom combination exists, but it has no valid timestamps. "
+        "Please choose a different room."
+    )
+    st.stop()
+
+min_d = active_df["datetime"].min().date()
+max_d = active_df["datetime"].max().date()
 default_d = max(min_d, min(max_d, pd.Timestamp("2023-11-06").date()))
-sel_date  = f4.date_input("Date", value=default_d, min_value=min_d, max_value=max_d)
-sel_time  = f5.time_input("Time", value=pd.Timestamp("07:45").time())
+
+sel_date = f4.date_input("Date", value=default_d, min_value=min_d, max_value=max_d)
+sel_time = f5.time_input("Time", value=pd.Timestamp("07:45").time())
 
 selected_ts = pd.Timestamp(f"{sel_date} {sel_time}")
-cur_row     = nearest(active_df, selected_ts)
-actual_ts   = pd.to_datetime(cur_row["datetime"])
+cur_row = nearest(active_df, selected_ts)
+
+if cur_row is None:
+    st.warning("No valid reading is available for the selected date and time.")
+    st.stop()
+
+actual_ts = pd.to_datetime(cur_row["datetime"])
 
 st.caption(
     f"Showing data for: **{infra}** · School {school} · Room {room} · "
@@ -387,7 +430,7 @@ fig.update_layout(
     plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
     yaxis=dict(gridcolor="#f3f4f6"), xaxis=dict(gridcolor="#f3f4f6"),
 )
-st.plotly_chart(fig, width=True)
+st.plotly_chart(fig, width="stretch")
 
 # ── Horizon cards ─────────────────────────────────────────────────────────────
 st.markdown("**Should I act now? — Forecast at each time horizon:**")
@@ -532,7 +575,7 @@ with left:
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(gridcolor="#f3f4f6"),
     )
-    st.plotly_chart(fig2, width=True)
+    st.plotly_chart(fig2, width="stretch")
 
 with right:
     fig3 = go.Figure()
@@ -557,7 +600,7 @@ with right:
         yaxis=dict(gridcolor="#f3f4f6"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig3, width=True)
+    st.plotly_chart(fig3, width="stretch")
 
 # ── Summary verdict table ──────────────────────────────────────────────────────
 st.markdown("**Summary: Air quality assessment by classroom type**")
