@@ -15,6 +15,10 @@ import requests
 import streamlit as st
 from sklearn.preprocessing import MinMaxScaler
 
+if "loaded" not in st.session_state:
+    st.cache_data.clear()
+    st.session_state["loaded"] = True
+
 warnings.filterwarnings("ignore")
 
 st.set_page_config(page_title="BreatheEasy", page_icon="🌬️", layout="wide")
@@ -118,29 +122,30 @@ def load_local_or_hf(filename):
             return io.BytesIO(p.read_bytes())
     return fetch(filename)
 
-@st.cache_data(show_spinner="Loading data...")
+@st.cache_data(show_spinner="Loading data...", max_entries=1)
 def load_all():
+    import gc
     full, test = None, None
-    for name in ["full_featured.parquet"]:
+
+    # Use test_display for UI (1.29MB vs 69.7MB - same rooms/schools/types)
+    for name in ["test_display.parquet"]:
         b = load_local_or_hf(name)
         if b:
             full = pd.read_parquet(b)
             break
-    for name in ["test.parquet", "test_display.parquet"]:
+
+    # Use test.parquet for predictions (has future cols)
+    for name in ["test.parquet"]:
         b = load_local_or_hf(name)
         if b:
             test = pd.read_parquet(b)
-            future_cols = [c for c in test.columns if "_future_" in c]
-            if future_cols:
-                break
-            test_fallback = test
-            test = None
-    if test is None:
-        test = test_fallback if 'test_fallback' in dir() else None
+            break
 
     for df in [full, test]:
         if df is not None and "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
+
+    gc.collect()
 
     scaler_p, feat_m = None, None
     b = load_local_or_hf("scaler_params.json")
