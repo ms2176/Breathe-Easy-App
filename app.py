@@ -5,50 +5,23 @@ Two jobs:
   2. Infra Compare  – which infrastructure type has the worst air quality
 """
 
-import io, json, os, pickle, warnings, sys, traceback
+import io, json, os, pickle, warnings
 from pathlib import Path
 
-# ── Streamlit must be imported first so we can render errors ──────────────────
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import requests
 import streamlit as st
-st.set_page_config(page_title="BreatheEasy", page_icon="🌬️", layout="wide")
-
-# ── All other imports wrapped so missing packages show a clear message ─────────
-_import_errors = []
-try:
-    import numpy as np
-except ImportError:
-    _import_errors.append("numpy")
-try:
-    import pandas as pd
-except ImportError:
-    _import_errors.append("pandas")
-try:
-    import plotly.graph_objects as go
-except ImportError:
-    _import_errors.append("plotly")
-try:
-    import requests
-except ImportError:
-    _import_errors.append("requests")
-try:
-    from sklearn.preprocessing import MinMaxScaler
-except ImportError:
-    _import_errors.append("scikit-learn")
-
-if _import_errors:
-    st.error(f"Missing required packages: {', '.join(_import_errors)}. Run: pip install {' '.join(_import_errors)}")
-    st.stop()
+from sklearn.preprocessing import MinMaxScaler
 
 warnings.filterwarnings("ignore")
 
+st.set_page_config(page_title="BreatheEasy", page_icon="🌬️", layout="wide")
+
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 HF_BASE  = "https://huggingface.co/datasets/mufliha/iaq-prediction/resolve/main"
-try:
-    HF_CACHE = Path(".hf_cache")
-    HF_CACHE.mkdir(exist_ok=True)
-except Exception:
-    HF_CACHE = Path("/tmp/.hf_cache")
-    HF_CACHE.mkdir(exist_ok=True)
+HF_CACHE = Path(".hf_cache"); HF_CACHE.mkdir(exist_ok=True)
 
 CO2_WARN     = 1000   # ppm
 CO2_CRITICAL = 2000   # ppm
@@ -222,19 +195,7 @@ def do_predict(row, horizon, scaler, feature_cols):
         return None
 
 def nearest(df, ts):
-    """Safely find the nearest row to ts. Returns None on any failure."""
-    try:
-        if df is None or df.empty:
-            return None
-        if "datetime" not in df.columns:
-            return None
-        valid = df.dropna(subset=["datetime"])
-        if valid.empty:
-            return None
-        idx = (valid["datetime"] - ts).abs().idxmin()
-        return valid.loc[idx]
-    except Exception:
-        return None
+    return df.loc[(df["datetime"] - ts).abs().idxmin()]
 
 def banner(cls, html):
     st.markdown(f'<div class="banner-{cls}">{html}</div>', unsafe_allow_html=True)
@@ -249,50 +210,18 @@ def worst_horizon_status(results):
             return "warn"
     return "safe"
 
-def safe_sorted_unique(series, cast=None):
-    """Return sorted unique non-null values from a series, optionally cast."""
-    try:
-        vals = series.dropna().unique()
-        if cast is not None:
-            vals = [cast(v) for v in vals]
-        return sorted(vals)
-    except Exception:
-        return []
-
 
 # ── BOOT ──────────────────────────────────────────────────────────────────────
 try:
     df_full, df_test, scaler_params, feature_meta = load_all()
-except Exception:
-    st.error("**Data loading failed.** Full traceback:")
-    st.code(traceback.format_exc())
+except Exception as e:
+    st.error(f"Could not load data: {e}")
     st.stop()
 
-if df_full is None and df_test is None:
-    st.error(
-        "No data files could be loaded (tried HuggingFace + local paths). "
-        "Need at least `full_featured.parquet` or `test.parquet`."
-    )
-    st.stop()
-
-try:
-    scaler       = build_scaler(scaler_params)
-    feature_cols = (feature_meta or {}).get("feature_cols", [])
-    ref_df       = df_full if df_full is not None else df_test
-    test_df      = df_test if df_test is not None else ref_df
-except Exception:
-    st.error("**Failed during scaler/feature setup:**")
-    st.code(traceback.format_exc())
-    st.stop()
-
-_required_cols = ["Classroom Type", "School No", "Room No", "datetime", "Measured CO2"]
-_missing = [c for c in _required_cols if c not in ref_df.columns]
-if _missing:
-    st.error(
-        f"Dataset is missing required columns: `{', '.join(_missing)}`\n\n"
-        f"Found: `{', '.join(ref_df.columns.tolist())}`"
-    )
-    st.stop()
+scaler       = build_scaler(scaler_params)
+feature_cols = (feature_meta or {}).get("feature_cols", [])
+ref_df       = df_full if df_full is not None else df_test
+test_df      = df_test if df_test is not None else ref_df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -308,6 +237,7 @@ st.divider()
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("### Is my classroom safe right now — and in the next few hours?")
 
+# ── Plain-language context for the administrator ──────────────────────────────
 st.markdown(
     '<div class="context-box">'
     '🏫 <b>How to use this section:</b> Select a classroom below, then pick a date and time. '
@@ -319,150 +249,39 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ── CASCADING DROPDOWNS ──────────────────────────────────────────────────────
-# Each level resets the ones below it when it changes, so the user can ONLY
-# ever pick a value that actually exists in the data.
+f1, f2, f3, f4, f5 = st.columns([1.4, 0.8, 0.8, 0.9, 0.9])
 
-infra_options = safe_sorted_unique(ref_df["Classroom Type"])
-if not infra_options:
-    st.error("No infrastructure types found in the dataset.")
-    st.stop()
+infra   = f1.selectbox("Infrastructure type", sorted(ref_df["Classroom Type"].dropna().unique()))
+sub_ref = ref_df[ref_df["Classroom Type"] == infra]
+school  = f2.selectbox("School", sorted(sub_ref["School No"].dropna().astype(int).unique()))
+sub_ref = sub_ref[sub_ref["School No"] == school]
+room    = f3.selectbox("Room",   sorted(sub_ref["Room No"].dropna().astype(int).unique()))
 
-# Initialise session state keys on first run
-if "sel_infra" not in st.session_state:
-    st.session_state["sel_infra"] = infra_options[0]
-if "sel_school" not in st.session_state:
-    st.session_state["sel_school"] = None
-if "sel_room" not in st.session_state:
-    st.session_state["sel_room"] = None
+room_test = test_df[
+    (test_df["Classroom Type"] == infra) &
+    (test_df["School No"]      == school) &
+    (test_df["Room No"]        == room)
+].copy() if test_df is not None else pd.DataFrame()
 
-def on_infra_change():
-    # Infra changed → wipe school + room so they recompute from scratch
-    st.session_state["sel_school"] = None
-    st.session_state["sel_room"]   = None
+active_df = room_test if len(room_test) > 0 else sub_ref[sub_ref["Room No"] == room].copy()
 
-def on_school_change():
-    # School changed → wipe room
-    st.session_state["sel_room"] = None
-
-f1, f2, f3 = st.columns([1.4, 0.8, 0.8])
-
-infra = f1.selectbox(
-    "Infrastructure type",
-    infra_options,
-    index=infra_options.index(st.session_state["sel_infra"])
-          if st.session_state["sel_infra"] in infra_options else 0,
-    key="sel_infra",
-    on_change=on_infra_change,
-)
-
-# School options — strictly filtered to chosen infra
-sub_infra     = ref_df[ref_df["Classroom Type"] == infra].copy()
-school_options = safe_sorted_unique(sub_infra["School No"], cast=int)
-if not school_options:
-    st.error(f"No schools exist for infrastructure type **{infra}**.")
-    st.stop()
-
-# Clamp saved school to valid options
-if st.session_state["sel_school"] not in school_options:
-    st.session_state["sel_school"] = school_options[0]
-
-school = f2.selectbox(
-    "School",
-    school_options,
-    index=school_options.index(st.session_state["sel_school"]),
-    key="sel_school",
-    on_change=on_school_change,
-)
-
-# Room options — strictly filtered to chosen infra + school
-sub_school   = sub_infra[sub_infra["School No"] == school].copy()
-room_options = safe_sorted_unique(sub_school["Room No"], cast=int)
-if not room_options:
-    st.error(f"No rooms exist for **{infra}** / School {school}.")
-    st.stop()
-
-# Clamp saved room to valid options
-if st.session_state["sel_room"] not in room_options:
-    st.session_state["sel_room"] = room_options[0]
-
-room = f3.selectbox(
-    "Room",
-    room_options,
-    index=room_options.index(st.session_state["sel_room"]),
-    key="sel_room",
-)
-
-# ── Build the active dataset for this combo ───────────────────────────────────
-# Prefer test data (has future actuals for validation); fall back to full data
-def filter_combo(df, infra, school, room):
-    if df is None or df.empty:
-        return pd.DataFrame()
-    try:
-        mask = (
-            (df["Classroom Type"] == infra) &
-            (df["School No"] == school) &
-            (df["Room No"] == room)
-        )
-        return df[mask].copy()
-    except Exception:
-        return pd.DataFrame()
-
-room_test = filter_combo(test_df, infra, school, room)
-room_ref  = filter_combo(ref_df,  infra, school, room)
-
-# Prefer test slice; fall back to ref slice
-active_df = room_test if not room_test.empty else room_ref
-
-# Validate active_df has usable datetimes
-if active_df.empty or "datetime" not in active_df.columns:
-    st.warning(
-        f"No data found for **{infra}** / School {school} / Room {room}. "
-        "Try a different combination."
-    )
-    st.stop()
-
-active_df = active_df.dropna(subset=["datetime"]).copy()
-
-if active_df.empty:
-    st.warning(
-        f"Data exists for this classroom but all timestamps are invalid. "
-        "Please choose a different room."
-    )
-    st.stop()
-
-# ── Date / time pickers — bounded to what actually exists ────────────────────
-min_d = active_df["datetime"].min().date()
-max_d = active_df["datetime"].max().date()
+min_d     = active_df["datetime"].min().date()
+max_d     = active_df["datetime"].max().date()
 default_d = max(min_d, min(max_d, pd.Timestamp("2023-11-06").date()))
-
-f4, f5 = st.columns([0.9, 0.9])
-sel_date = f4.date_input("Date", value=default_d, min_value=min_d, max_value=max_d)
-sel_time = f5.time_input("Time", value=pd.Timestamp("07:45").time())
+sel_date  = f4.date_input("Date", value=default_d, min_value=min_d, max_value=max_d)
+sel_time  = f5.time_input("Time", value=pd.Timestamp("07:45").time())
 
 selected_ts = pd.Timestamp(f"{sel_date} {sel_time}")
-cur_row = nearest(active_df, selected_ts)
-
-if cur_row is None:
-    st.warning("No valid reading found for the selected date and time. Try a different time.")
-    st.stop()
-
-actual_ts = pd.to_datetime(cur_row["datetime"])
+cur_row     = nearest(active_df, selected_ts)
+actual_ts   = pd.to_datetime(cur_row["datetime"])
 
 st.caption(
     f"Showing data for: **{infra}** · School {school} · Room {room} · "
-    f"Nearest recorded reading: **{actual_ts.strftime('%d %b %Y, %H:%M')}**"
+    f"Nearest recorded reading to your selection: **{actual_ts.strftime('%d %b %Y, %H:%M')}**"
 )
 
 # ── Current snapshot ──────────────────────────────────────────────────────────
-def safe_float(row, col):
-    try:
-        v = row[col]
-        return float(v) if pd.notna(v) else np.nan
-    except Exception:
-        return np.nan
-
-co2_now = safe_float(cur_row, "Measured CO2")
+co2_now = float(cur_row["Measured CO2"]) if "Measured CO2" in cur_row.index and pd.notna(cur_row["Measured CO2"]) else np.nan
 
 if not np.isnan(co2_now):
     cls, lbl, *_ = co2_status(co2_now)
@@ -472,18 +291,12 @@ if not np.isnan(co2_now):
         "critical": f"🔴 <b>Immediate action required.</b> CO₂ is <b>{co2_now:.0f} ppm</b> — critically high. Open windows and doors now.",
     }
     banner(cls, msgs[cls])
-else:
-    banner("warn", "⚠️ CO₂ reading is unavailable for this timestamp.")
 
 st.markdown("**Current readings in this classroom:**")
 m_cols = st.columns(5)
-m_cols[0].metric(
-    "CO₂ (ppm)",
-    f"{co2_now:.0f}" if not np.isnan(co2_now) else "—",
-    help="Safe below 1,000 ppm. Above 2,000 ppm is critical."
-)
+m_cols[0].metric("CO₂ (ppm)", f"{co2_now:.0f}" if not np.isnan(co2_now) else "—", help="Safe below 1,000 ppm. Above 2,000 ppm is critical.")
 for col, (target, (label, unit)) in zip(m_cols[1:], SECONDARY.items()):
-    v = safe_float(cur_row, target)
+    v = float(cur_row[target]) if target in cur_row.index and pd.notna(cur_row[target]) else np.nan
     col.metric(f"{label} ({unit})", f"{v:.1f}" if not np.isnan(v) else "—")
 
 st.divider()
@@ -491,16 +304,17 @@ st.divider()
 # ── Forecast ──────────────────────────────────────────────────────────────────
 st.markdown("### What will the air quality be like in the next few hours?")
 
-# Run all predictions — wrapped so one bad horizon never kills the rest
+# Run all predictions
 results = []
 for hz_key, (hz_label, hz_delta) in HORIZONS.items():
-    future_ts = actual_ts + hz_delta
-    try:
-        pred = do_predict(cur_row, hz_key, scaler, feature_cols)
-    except Exception:
-        pred = None
+    future_ts  = actual_ts + hz_delta
+    pred       = do_predict(cur_row, hz_key, scaler, feature_cols)
     actual_col = f"Measured CO2_future_{hz_key}"
-    actual_val = safe_float(cur_row, actual_col)
+    actual_val = (
+        float(cur_row[actual_col])
+        if actual_col in cur_row.index and pd.notna(cur_row[actual_col])
+        else np.nan
+    )
     results.append({
         "hz_key":    hz_key,
         "label":     hz_label,
@@ -509,7 +323,7 @@ for hz_key, (hz_label, hz_delta) in HORIZONS.items():
         "actual":    actual_val,
     })
 
-# Overall risk summary
+# Overall risk summary — plain language for administrator
 worst_cls = worst_horizon_status(results)
 risk_msgs = {
     "safe":     "✅ <b>Good news.</b> Air quality is forecast to remain safe for the next 6 hours. No ventilation action is needed right now.",
@@ -573,7 +387,7 @@ fig.update_layout(
     plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
     yaxis=dict(gridcolor="#f3f4f6"), xaxis=dict(gridcolor="#f3f4f6"),
 )
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig, width=True)
 
 # ── Horizon cards ─────────────────────────────────────────────────────────────
 st.markdown("**Should I act now? — Forecast at each time horizon:**")
@@ -637,138 +451,137 @@ st.markdown(
 
 cmp = ref_df.dropna(subset=["Measured CO2"]).copy()
 
-if cmp.empty:
-    st.warning("Not enough data to compare infrastructure types.")
-else:
-    infra_stats = (
-        cmp.groupby("Classroom Type")["Measured CO2"]
-        .agg(
-            Mean      ="mean",
-            Peak      ="max",
-            warn_rate =lambda x: (x >= CO2_WARN).mean() * 100,
-            crit_rate =lambda x: (x >= CO2_CRITICAL).mean() * 100,
-            Readings  ="count",
-        )
-        .reset_index()
-        .sort_values("warn_rate", ascending=False)
-        .rename(columns={
-            "Classroom Type": "Type",
-            "warn_rate":      "Warning rate (%)",
-            "crit_rate":      "Critical rate (%)",
-        })
+infra_stats = (
+    cmp.groupby("Classroom Type")["Measured CO2"]
+    .agg(
+        Mean      ="mean",
+        Peak      ="max",
+        warn_rate =lambda x: (x >= CO2_WARN).mean() * 100,
+        crit_rate =lambda x: (x >= CO2_CRITICAL).mean() * 100,
+        Readings  ="count",
     )
+    .reset_index()
+    .sort_values("warn_rate", ascending=False)
+    .rename(columns={
+        "Classroom Type": "Type",
+        "warn_rate":      "Warning rate (%)",
+        "crit_rate":      "Critical rate (%)",
+    })
+)
 
-    if infra_stats.empty:
-        st.warning("No infrastructure statistics could be calculated.")
-    else:
-        worst = infra_stats.iloc[0]
-        best  = infra_stats.iloc[-1]
-        w_cls = "critical" if worst["Warning rate (%)"] > 30 else "warn" if worst["Warning rate (%)"] > 10 else "safe"
+worst = infra_stats.iloc[0]
+best  = infra_stats.iloc[-1]
+w_cls = "critical" if worst["Warning rate (%)"] > 30 else "warn" if worst["Warning rate (%)"] > 10 else "safe"
 
-        banner(
-            w_cls,
-            f"🏫 <b>{worst['Type']}</b> needs the most attention: CO₂ exceeded the safe limit "
-            f"<b>{worst['Warning rate (%)']:.1f}% of the time</b> "
-            f"(average {worst['Mean']:.0f} ppm, peak {worst['Peak']:.0f} ppm). "
-            f"<b>{best['Type']}</b> performed best, with unsafe CO₂ in only {best['Warning rate (%)']:.1f}% of readings."
-        )
+# Plain-language verdict using actual numbers
+banner(
+    w_cls,
+    f"🏫 <b>{worst['Type']}</b> needs the most attention: CO₂ exceeded the safe limit "
+    f"<b>{worst['Warning rate (%)']:.1f}% of the time</b> "
+    f"(average {worst['Mean']:.0f} ppm, peak {worst['Peak']:.0f} ppm). "
+    f"<b>{best['Type']}</b> performed best, with unsafe CO₂ in only {best['Warning rate (%)']:.1f}% of readings."
+)
 
-        left, right = st.columns(2)
+left, right = st.columns(2)
 
-        def infra_verdict(warn_rate):
-            if warn_rate > 30:  return "🔴 High concern"
-            elif warn_rate > 10: return "⚠️ Moderate concern"
-            elif warn_rate > 5:  return "🟡 Low concern"
-            return "✅ Generally safe"
+with left:
+    # Add a plain verdict column
+    def infra_verdict(warn_rate):
+        if warn_rate > 30:
+            return "🔴 High concern"
+        elif warn_rate > 10:
+            return "⚠️ Moderate concern"
+        elif warn_rate > 5:
+            return "🟡 Low concern"
+        return "✅ Generally safe"
 
-        bar_colors = [
-            "#DC2626" if v > 30 else "#F59E0B" if v > 10 else "#84cc16" if v > 5 else "#22c55e"
-            for v in infra_stats["Warning rate (%)"]
-        ]
+    bar_colors = [
+        "#DC2626" if v > 30 else "#F59E0B" if v > 10 else "#84cc16" if v > 5 else "#22c55e"
+        for v in infra_stats["Warning rate (%)"]
+    ]
 
-        with left:
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(
-                x=infra_stats["Type"],
-                y=infra_stats["Warning rate (%)"],
-                marker_color=bar_colors,
-                text=[f"{v:.1f}%" for v in infra_stats["Warning rate (%)"]],
-                textposition="outside",
-                customdata=np.stack([
-                    infra_stats["Mean"].round(0),
-                    infra_stats["Peak"].round(0),
-                    infra_stats["Critical rate (%)"].round(1),
-                    infra_stats["Readings"],
-                    [infra_verdict(v) for v in infra_stats["Warning rate (%)"]],
-                ], axis=-1),
-                hovertemplate=(
-                    "<b>%{x}</b><br>"
-                    "Unsafe air quality: %{y:.1f}% of the time<br>"
-                    "Average CO₂: %{customdata[0]:.0f} ppm<br>"
-                    "Peak CO₂: %{customdata[1]:.0f} ppm<br>"
-                    "Critically high: %{customdata[2]:.1f}% of the time<br>"
-                    "Total readings: %{customdata[3]:,}<br>"
-                    "Assessment: %{customdata[4]}<extra></extra>"
-                ),
-            ))
-            fig2.update_layout(
-                title="How often was CO₂ above the safe limit? (by classroom type)",
-                height=380, margin=dict(l=8, r=8, t=48, b=8),
-                yaxis_title="% of time CO₂ exceeded 1,000 ppm",
-                xaxis_title="",
-                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                yaxis=dict(gridcolor="#f3f4f6"),
-            )
-            st.plotly_chart(fig2, width="stretch")
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(
+        x=infra_stats["Type"],
+        y=infra_stats["Warning rate (%)"],
+        marker_color=bar_colors,
+        text=[f"{v:.1f}%" for v in infra_stats["Warning rate (%)"]],
+        textposition="outside",
+        customdata=np.stack([
+            infra_stats["Mean"].round(0),
+            infra_stats["Peak"].round(0),
+            infra_stats["Critical rate (%)"].round(1),
+            infra_stats["Readings"],
+            [infra_verdict(v) for v in infra_stats["Warning rate (%)"]],
+        ], axis=-1),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Unsafe air quality: %{y:.1f}% of the time<br>"
+            "Average CO₂: %{customdata[0]:.0f} ppm<br>"
+            "Peak CO₂: %{customdata[1]:.0f} ppm<br>"
+            "Critically high: %{customdata[2]:.1f}% of the time<br>"
+            "Total readings: %{customdata[3]:,}<br>"
+            "Assessment: %{customdata[4]}<extra></extra>"
+        ),
+    ))
+    fig2.update_layout(
+        title="How often was CO₂ above the safe limit? (by classroom type)",
+        height=380, margin=dict(l=8, r=8, t=48, b=8),
+        yaxis_title="% of time CO₂ exceeded 1,000 ppm",
+        xaxis_title="",
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="#f3f4f6"),
+    )
+    st.plotly_chart(fig2, width=True)
 
-        with right:
-            fig3 = go.Figure()
-            fig3.add_trace(go.Bar(
-                x=infra_stats["Type"], y=infra_stats["Mean"],
-                name="Average CO₂", marker_color="#335CFF", opacity=0.85,
-                text=[f"{v:.0f}" for v in infra_stats["Mean"]], textposition="outside",
-            ))
-            fig3.add_trace(go.Bar(
-                x=infra_stats["Type"], y=infra_stats["Peak"],
-                name="Highest recorded CO₂", marker_color="#DC2626", opacity=0.6,
-                text=[f"{v:.0f}" for v in infra_stats["Peak"]], textposition="outside",
-            ))
-            fig3.add_hline(y=CO2_WARN, line_dash="dash", line_color="#F59E0B",
-                           annotation_text="Safe limit: 1,000 ppm", annotation_position="top right")
-            fig3.update_layout(
-                title="Average and highest CO₂ recorded (by classroom type)",
-                height=380, barmode="group", margin=dict(l=8, r=8, t=48, b=8),
-                yaxis_title="CO₂ (ppm)",
-                xaxis_title="",
-                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                yaxis=dict(gridcolor="#f3f4f6"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            )
-            st.plotly_chart(fig3, width="stretch")
+with right:
+    fig3 = go.Figure()
+    fig3.add_trace(go.Bar(
+        x=infra_stats["Type"], y=infra_stats["Mean"],
+        name="Average CO₂", marker_color="#335CFF", opacity=0.85,
+        text=[f"{v:.0f}" for v in infra_stats["Mean"]], textposition="outside",
+    ))
+    fig3.add_trace(go.Bar(
+        x=infra_stats["Type"], y=infra_stats["Peak"],
+        name="Highest recorded CO₂", marker_color="#DC2626", opacity=0.6,
+        text=[f"{v:.0f}" for v in infra_stats["Peak"]], textposition="outside",
+    ))
+    fig3.add_hline(y=CO2_WARN, line_dash="dash", line_color="#F59E0B",
+                   annotation_text="Safe limit: 1,000 ppm", annotation_position="top right")
+    fig3.update_layout(
+        title="Average and highest CO₂ recorded (by classroom type)",
+        height=380, barmode="group", margin=dict(l=8, r=8, t=48, b=8),
+        yaxis_title="CO₂ (ppm)",
+        xaxis_title="",
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="#f3f4f6"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig3, width=True)
 
-        # ── Summary verdict table ──────────────────────────────────────────────────────
-        st.markdown("**Summary: Air quality assessment by classroom type**")
-        verdict_cols = st.columns(len(infra_stats))
-        for col, (_, row) in zip(verdict_cols, infra_stats.iterrows()):
-            v = infra_verdict(row["Warning rate (%)"])
-            cls_bg = (
-                "#fef2f2" if row["Warning rate (%)"] > 30
-                else "#fff7ed" if row["Warning rate (%)"] > 10
-                else "#f0fdf4"
-            )
-            cls_txt = (
-                "#991b1b" if row["Warning rate (%)"] > 30
-                else "#9a6700" if row["Warning rate (%)"] > 10
-                else "#166534"
-            )
-            col.markdown(
-                f"<div style='background:{cls_bg};border-radius:10px;padding:10px 8px;text-align:center;'>"
-                f"<div style='font-size:.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;'>{row['Type']}</div>"
-                f"<div style='font-size:1.1rem;font-weight:700;color:{cls_txt};'>{row['Warning rate (%)']:.1f}%</div>"
-                f"<div style='font-size:.72rem;color:{cls_txt};margin-top:3px;'>{v}</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
+# ── Summary verdict table ──────────────────────────────────────────────────────
+st.markdown("**Summary: Air quality assessment by classroom type**")
+verdict_cols = st.columns(len(infra_stats))
+for col, (_, row) in zip(verdict_cols, infra_stats.iterrows()):
+    v = infra_verdict(row["Warning rate (%)"])
+    cls_bg = (
+        "#fef2f2" if row["Warning rate (%)"] > 30
+        else "#fff7ed" if row["Warning rate (%)"] > 10
+        else "#f0fdf4"
+    )
+    cls_txt = (
+        "#991b1b" if row["Warning rate (%)"] > 30
+        else "#9a6700" if row["Warning rate (%)"] > 10
+        else "#166534"
+    )
+    col.markdown(
+        f"<div style='background:{cls_bg};border-radius:10px;padding:10px 8px;text-align:center;'>"
+        f"<div style='font-size:.75rem;font-weight:600;color:#6b7280;margin-bottom:4px;'>{row['Type']}</div>"
+        f"<div style='font-size:1.1rem;font-weight:700;color:{cls_txt};'>{row['Warning rate (%)']:.1f}%</div>"
+        f"<div style='font-size:.72rem;color:{cls_txt};margin-top:3px;'>{v}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
 
 st.divider()
 st.caption(
